@@ -8,6 +8,8 @@ edition = "2018"
 
 [dependencies]
 clap = { git = "https://github.com/clap-rs/clap/" }
+crossbeam-channel = "0.4"
+crossbeam-utils = "0.7"
 disque = { version = "*" }
 rand = { version = "*" }
 redis = { version = "*" }
@@ -16,3 +18,4 @@ serde_json = "1.0"
 
 failure = { version = "*" }
 exitfailure = { version = "*" }
+signal-hook = { version = "*" }
