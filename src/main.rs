@@ -7,6 +7,7 @@ extern crate disque;
 extern crate indicatif;
 extern crate itertools;
 extern crate rand;
+extern crate shellexpand;
 
 mod job;
 mod signals;
@@ -18,15 +19,16 @@ use std::io;
 use std::io::prelude::*;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 static GLOBAL_JOBS_COUNT: AtomicUsize = AtomicUsize::new(0);
 static GLOBAL_ABORT: AtomicBool = AtomicBool::new(false);
+const GETJOB_COUNT: usize = 128;
 
 use clap::{crate_version, App, Arg};
 use crossbeam_channel::{bounded, select, tick};
 use disque::{AddJobBuilder, Disque};
-use failure::{format_err, Error};
+use failure::Error;
 use indicatif::{ProgressBar, ProgressStyle};
 use itertools::Itertools;
 
@@ -77,6 +79,12 @@ fn try_main() -> Result<(), Error> {
                 .short('P')
                 .help("Enable progress output"),
         )
+        .arg(Arg::with_name("stdin").short('s').help(
+            "Read commands from stdin, one per line.\n\
+             If COMMAND is given, each line at spaces, and replace \"${N}\" \
+             with word at position 'N' (starting at 1), or \"${0}\" with whole \
+             line.",
+        ))
         .arg(
             Arg::with_name("repo")
                 .short('r')
@@ -122,7 +130,7 @@ fn try_main() -> Result<(), Error> {
 
     let progress = matches.is_present("progress");
 
-    /* set up event loop */
+    /* set up channels */
     let ctrl_c = sigint_notifier().unwrap();
     let update = tick(Duration::from_secs(1));
     let (tx_cmds, rx_cmds) = bounded::<String>(1024);
@@ -130,46 +138,43 @@ fn try_main() -> Result<(), Error> {
     let (tx_result, rx_result) = bounded(1024);
     let (tx_reader, rx_reader) = bounded(1);
 
-    // keep track of jobs
+    /* used to keep track of jobs */
     let mut jobs = HashSet::new();
     let mut more_jobs_coming = true;
-    let mut jobs_left = 0;
 
-    let disque_url_sender = disque_url.clone();
-    let job_sender = thread::spawn(move || {
-        /* connect to disque */
-        let disque_url: &str = &disque_url_sender;
-        let disque = Disque::open(disque_url).unwrap();
+    let mut job_sender = Vec::new();
+    for _ in 1..8 {
+        let disque_url_sender = disque_url.clone();
         let tx = tx_jobid.clone();
-        loop {
-            let body_json = match rx_cmds.recv() {
-                Ok(value) => value,
-                Err(_) => break,
-            };
-            // send job
-            let jobid = AddJobBuilder::new(queue.as_bytes(), body_json.as_bytes(), 300 * 1000)
-                .ttl(24 * 60 * 60 * 1000)
-                .run(&disque)
-                .unwrap();
+        let rx = rx_cmds.clone();
+        let queue = queue.clone();
+        job_sender.push(thread::spawn(move || {
+            /* connect to disque */
+            let disque_url: &str = &disque_url_sender;
+            let disque = Disque::open(disque_url).unwrap();
+            loop {
+                let body_json = match rx.recv() {
+                    Ok(value) => value,
+                    Err(_) => break,
+                };
+                // send job
+                let jobid = AddJobBuilder::new(queue.as_bytes(), body_json.as_bytes(), 300 * 1000)
+                    .ttl(24 * 60 * 60 * 1000)
+                    .run(&disque)
+                    .unwrap();
 
-            tx.send(jobid).unwrap();
-        }
-        println!("dwqc: job sender done.");
-    });
+                match tx.send(jobid) {
+                    Ok(_) => (),
+                    Err(_) => return, // assuming this only happens if main has aborted.
+                }
+            }
+            //println!("dwqc: job sender done.");
+        }));
+    }
 
     let disque_url_receiver = disque_url.clone();
     let control_queue_receiver = control_queue.clone();
     thread::spawn(move || {
-        fn get_result(disque: &Disque, control_queue: &str) -> Result<ResultBody, Error> {
-            let result = disque.getjob(false, None, &[control_queue.as_bytes()])?;
-            let (_res_q, _res_id, res_body_json) = match result {
-                None => return Err(format_err!("timeout getting job result")),
-                Some(t) => t,
-            };
-
-            let res_body: ResultBody = serde_json::from_slice(&res_body_json).unwrap();
-            Ok(res_body)
-        };
         /* connect to disque */
         let disque_url_receiver: &str = &disque_url_receiver;
         let disque = Disque::open(disque_url_receiver).unwrap();
@@ -177,13 +182,25 @@ fn try_main() -> Result<(), Error> {
         let tx = tx_result.clone();
 
         loop {
-            let res_body = get_result(&disque, &control_queue_receiver);
-            match tx.send(res_body) {
-                Ok(_) => continue,
+            let result = disque.getjob_count(
+                false,
+                None,
+                GETJOB_COUNT,
+                &[&control_queue_receiver.as_bytes()],
+            );
+            let result = match result {
+                Ok(t) => t,
                 Err(_) => break,
+            };
+            for (_, _, res_body_json) in result.iter() {
+                let res_body: ResultBody = serde_json::from_slice(&res_body_json).unwrap();
+                match tx.send(res_body) {
+                    Ok(_) => continue,
+                    Err(_) => break,
+                }
             }
         }
-        println!("dwqc: result_receiver done.");
+        //println!("dwqc: result_receiver done.");
     });
 
     fn handle_result(jobs: &HashSet<String>, res_body: &ResultBody) -> bool {
@@ -284,7 +301,7 @@ fn try_main() -> Result<(), Error> {
                 if progress {
                     print!("{}", ansi_escapes::EraseLines(2));
                 }
-                let res_body = res_body.unwrap().unwrap();
+                let res_body = res_body.unwrap();
                 if handle_result(&jobs, &res_body) == false {
                     continue;
                 }
@@ -328,7 +345,7 @@ fn try_main() -> Result<(), Error> {
         }
     }
 
-    job_sender.join().unwrap();
+    //    job_sender.join().unwrap();
     std::process::exit(result);
     //result_receiver.join().unwrap();
 }
