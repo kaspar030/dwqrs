@@ -8,7 +8,7 @@ use std::io;
 use std::thread;
 
 // Creates a channel that sends a message every time some signals arrive.
-pub fn sigint_notifier() -> io::Result<Receiver<()>> {
+pub fn signal_notifier() -> io::Result<Receiver<()>> {
     let (s, r) = bounded(100);
     let signals = Signals::new(&[SIGINT, SIGPIPE, SIGTERM])?;
 

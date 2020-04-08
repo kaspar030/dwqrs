@@ -33,7 +33,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use itertools::Itertools;
 
 use job::{CmdBody, ResultBody};
-use signals::sigint_notifier;
+use signals::signal_notifier;
 
 fn main() {
     let result = try_main();
@@ -131,7 +131,7 @@ fn try_main() -> Result<(), Error> {
     let progress = matches.is_present("progress");
 
     /* set up channels */
-    let ctrl_c = sigint_notifier().unwrap();
+    let signals = signal_notifier().unwrap();
     let update = tick(Duration::from_secs(1));
     let (tx_cmds, rx_cmds) = bounded::<String>(1024);
     let (tx_jobid, rx_jobid) = bounded(1024);
@@ -318,7 +318,7 @@ fn try_main() -> Result<(), Error> {
                     bar.println("");
                 }
             }
-            recv(ctrl_c) -> _ => {
+            recv(signals) -> _ => {
                 println!();
                 println!("dwqc: aborted.");
                 GLOBAL_ABORT.store(true, Ordering::Relaxed);
