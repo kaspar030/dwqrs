@@ -240,12 +240,14 @@ fn try_main() -> Result<(), Error> {
             let stdin = io::stdin();
             for line in stdin.lock().lines() {
                 let line = line.unwrap().to_string();
+                let split = line.split("###");
+                let parts = split.map(|x| x.trim()).collect::<Vec<_>>();
                 //println!("job: {}", line);
                 // create json job body
                 let body_json = CmdBody::new(
                     matches.value_of("repo").unwrap().to_string(),
                     matches.value_of("commit").unwrap().to_string(),
-                    line,
+                    parts[0].to_string(),
                     Some(&control_queue),
                 )
                 .to_json();
